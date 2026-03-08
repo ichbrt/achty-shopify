@@ -1,0 +1,38 @@
+{
+    "name": "achty-shopify",
+    "private": true,
+    "scripts": {
+        "build": "prisma generate && remix vite:build",
+        "dev": "shopify app dev",
+        "lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
+        "shopify": "shopify",
+        "prisma": "prisma",
+        "setup": "prisma generate && prisma migrate deploy",
+        "postinstall": "prisma generate"
+    },
+    "type": "module",
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "dependencies": {
+        "@prisma/client": "^6.0.0",
+        "@remix-run/dev": "^2.16.0",
+        "@remix-run/node": "^2.16.0",
+        "@remix-run/react": "^2.16.0",
+        "@shopify/app-bridge-react": "^4.1.0",
+        "@shopify/polaris": "^13.0.0",
+        "@shopify/shopify-app-remix": "^3.0.0",
+        "@shopify/shopify-app-session-storage-prisma": "^5.0.0",
+        "@shopify/polaris-icons": "^9.0.0",
+        "isbot": "^5.1.0",
+        "prisma": "^6.0.0",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
+        "vite": "^5.1.0",
+        "vite-tsconfig-paths": "^4.3.1"
+    },
+    "devDependencies": {
+        "@remix-run/eslint-config": "^2.16.0",
+        "eslint": "^8.57.0"
+    }
+}

@@ -1,0 +1,83 @@
+// This is your Prisma schema file for ACHTy Shopify App
+// Separate from aivista — uses its own database
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Shopify session storage (required by @shopify/shopify-app-remix)
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String?
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+}
+
+// Shop info — linked Shopify store
+model Shop {
+  id          String   @id @default(cuid())
+  shopDomain  String   @unique
+  shopName    String?
+  email       String?
+  plan        String   @default("free")
+  accessToken String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  projects    Project[]
+}
+
+// AI Visibility project (URL to monitor)
+model Project {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  url         String
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  scans       Scan[]
+}
+
+// AI Scan (one run of visibility check)
+model Scan {
+  id          String       @id @default(cuid())
+  projectId   String
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status      String       @default("pending") // pending, running, completed, failed
+  score       Float?       // 0-100 visibility score
+  summary     String?
+  createdAt   DateTime     @default(now())
+  completedAt DateTime?
+  results     ScanResult[]
+}
+
+// Individual scan result per AI platform
+model ScanResult {
+  id          String   @id @default(cuid())
+  scanId      String
+  scan        Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  platform    String   // chatgpt, gemini, perplexity
+  prompt      String
+  response    String?
+  mentioned   Boolean  @default(false)
+  sentiment   String?  // positive, negative, neutral
+  position    Int?     // ranking position if mentioned
+  createdAt   DateTime @default(now())
+}
