@@ -2,7 +2,7 @@
     "name": "achty-shopify",
     "private": true,
     "scripts": {
-        "build": "prisma generate && remix vite:build",
+        "build": "prisma generate && prisma migrate deploy && remix vite:build",
         "dev": "shopify app dev",
         "lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
         "shopify": "shopify",

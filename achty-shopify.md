@@ -73,12 +73,61 @@ A comprehensive security and production-readiness audit was performed and all cr
     *   Added `prisma generate` to build script and `postinstall` hook for deployment compatibility.
     *   Created `.env.example` documenting all required environment variables.
 
+## 7. Altyapı Kurulumu & Canlıya Çıkış (Infrastructure & Deployment)
+Uygulama geliştirme ortamından çıkarılıp canlı sunuculara taşındı.
+
+*   **Veritabanı — Supabase PostgreSQL:**
+    *   Supabase üzerinde PostgreSQL veritabanı oluşturuldu (`db.fympfizkmpulwdvjmvlf.supabase.co`).
+    *   `prisma migrate deploy` komutu ile tüm tablolar (Session, Shop, Project, Scan, ScanResult) başarılı şekilde oluşturuldu.
+    *   `prisma/schema.prisma` dosyası SQLite'tan PostgreSQL'e daha önce geçirilmişti, migration dosyası (`20260308113519_init`) ile canlı veritabanına uygulandı.
+
+*   **Hosting — Vercel Deployment:**
+    *   GitHub reposu (`github.com/ichbrt/achty-shopify`) Vercel'e bağlandı.
+    *   Framework preset: **Remix** olarak ayarlandı.
+    *   Ortam değişkenleri Vercel Dashboard'dan girildi: `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `DATABASE_URL`, `SCOPES`, `BILLING_TEST_MODE`.
+    *   Production URL: `https://achty-shopify.vercel.app`
+
+*   **Shopify App Deploy:**
+    *   `shopify.app.toml` dosyası production URL ile güncellendi (`application_url`, `redirect_urls`, `app_proxy` alanları).
+    *   `shopify app deploy --force` komutu ile Shopify Partners'a başarılı deploy yapıldı (versiyon: `achty-ai-ai-recommends-you-2`).
+    *   GDPR webhook topic'leri (`customers/data_request`, `customers/redact`, `shop/redact`) toml'dan çıkarıldı — Shopify CLI bunları desteklemiyor, Partners Dashboard'dan manuel girilmesi gerekiyor.
+
+*   **Git & Versiyon Kontrolü:**
+    *   Git reposu initialize edildi, tüm dosyalar commit'lendi.
+    *   GitHub'a push yapıldı → Vercel otomatik redeploy tetiklendi.
+
+## 8. Hata Düzeltmeleri — Son Aşama
+
+*   **"Prisma session table does not exist" Hatası:**
+    *   `.env` dosyasında `DATABASE_URL` eksikti — `shopify app env show` komutu `.env` dosyasını sadece `SHOPIFY_API_KEY` ve `SHOPIFY_API_SECRET` ile yeniden oluşturmuştu.
+    *   `DATABASE_URL`, `SCOPES` ve `BILLING_TEST_MODE` değişkenleri `.env` dosyasına eklendi.
+    *   Prisma client yeniden generate edildi (`npx prisma generate`).
+
+*   **Schema Geri Yükleme:**
+    *   `prisma db pull --force` komutu çalıştırılınca `schema.prisma` dosyası veritabanından okunan ham yapıyla ezilmişti (relation name'ler, `@default(cuid())`, `@updatedAt` kaybolmuştu).
+    *   Orijinal schema geri yüklendi — tüm relation isimler, default değerler ve yorumlar düzeltildi.
+
+*   **Build Script Güncelleme:**
+    *   `package.json` build komutu `"prisma generate && prisma migrate deploy && remix vite:build"` olarak güncellendi.
+    *   Bu sayede Vercel deploy sırasında migration'lar otomatik çalışıyor.
+
 ---
 
-**Next Steps**
-1.  Connect the actual artificial intelligence (`lib/services/ai-seo.ts`) from our AIVista project directly into the Shopify app's code to generate real-time reports via OpenAI/Gemini. (Currently, analyses return static/random numbers).
-2.  Set up **Supabase** (PostgreSQL database) and **Vercel** (hosting).
-3.  Configure all environment variables on Vercel.
-4.  Run `prisma migrate deploy` against production database.
-5.  Update `shopify.app.toml` with production URL and deploy via `shopify app deploy`.
-6.  Submit app for Shopify App Store review.
+**Mevcut Durum & Kalan Adımlar**
+
+✅ Tamamlanan:
+- Tüm güvenlik düzeltmeleri (erişim kontrolü, API secret, GDPR, input validation)
+- Fiyatlandırma: Pro $199.90/ay, Free 1 scan (skor 35-46)
+- Supabase PostgreSQL veritabanı kuruldu ve migration uygulandı
+- Vercel'e deploy yapıldı (Remix preset)
+- Shopify Partners'a app deploy edildi (v2)
+- GitHub'a push yapıldı
+
+❌ Kalan:
+1.  `.env` dosyasına `DATABASE_URL` eklenmesi gerekiyor (Supabase şifresi gerekli).
+2.  Vercel'de `SHOPIFY_APP_URL=https://achty-shopify.vercel.app` ortam değişkeni eklenmeli.
+3.  Partners Dashboard'dan GDPR webhook URL'leri girilmeli (üçü de `https://achty-shopify.vercel.app/webhooks`).
+4.  Dev store'da test kurulumu yapılmalı (`achty-dev.myshopify.com`).
+5.  `BILLING_TEST_MODE` production'da `false` yapılmalı (gerçek ödeme alınacaksa).
+6.  Gerçek AI entegrasyonu (OpenAI/Gemini) bağlanmalı — şu an skorlar rastgele üretiliyor.
+7.  Shopify App Store review'a gönderilmeli.
