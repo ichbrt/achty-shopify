@@ -111,23 +111,53 @@ Uygulama geliştirme ortamından çıkarılıp canlı sunuculara taşındı.
     *   `package.json` build komutu `"prisma generate && prisma migrate deploy && remix vite:build"` olarak güncellendi.
     *   Bu sayede Vercel deploy sırasında migration'lar otomatik çalışıyor.
 
+## 9. Veritabanı Bağlantı Hatası Çözümü & Son Düzeltmeler
+
+*   **DATABASE_URL Formatı Düzeltildi:**
+    *   `.env` dosyasında `DATABASE_URL` ya eksikti ya da eski SQLite formatında (`file:./dev.db`) kalmıştı.
+    *   Supabase PostgreSQL bağlantı string'i doğru formatta eklendi.
+    *   **Önemli:** Kullanıcı adı `postgres` olmalı (`postgres.fympfizkmpulwdvjmvlf` değil — bu pooler formatı, direct connection'da çalışmıyor).
+    *   Şifredeki özel karakterler (`!!!!`) URL encode edildi → `%21%21%21%21`.
+    *   Final format: `postgresql://postgres:[SIFRE]@db.fympfizkmpulwdvjmvlf.supabase.co:5432/postgres`
+
+*   **Prisma Client Yeniden Generate:**
+    *   Node.js process'leri Prisma DLL dosyasını kilitlediği için `EPERM` hatası alındı.
+    *   Process'ler durdurulup `npx prisma generate` başarıyla çalıştırıldı (v6.19.2).
+
+*   **Veritabanı Bağlantı Doğrulaması:**
+    *   `npx prisma migrate status` → "Database schema is up to date!" ✅
+    *   5 tablo mevcut: Session, Shop, Project, Scan, ScanResult ✅
+
+*   **Git Push & Vercel Auto-Redeploy:**
+    *   Tüm değişiklikler commit'lendi (`a3f3410`) ve GitHub'a push yapıldı.
+    *   Vercel otomatik redeploy tetiklendi.
+
 ---
 
-**Mevcut Durum & Kalan Adımlar**
+**Mevcut Durum & Kalan Adımlar** *(9 Mart 2026)*
 
 ✅ Tamamlanan:
 - Tüm güvenlik düzeltmeleri (erişim kontrolü, API secret, GDPR, input validation)
 - Fiyatlandırma: Pro $199.90/ay, Free 1 scan (skor 35-46)
 - Supabase PostgreSQL veritabanı kuruldu ve migration uygulandı
-- Vercel'e deploy yapıldı (Remix preset)
-- Shopify Partners'a app deploy edildi (v2)
-- GitHub'a push yapıldı
+- Lokal `.env` dosyası tamamlandı (DATABASE_URL, API keys, scopes hepsi mevcut)
+- `package.json` build script'i güncellendi (`prisma generate && prisma migrate deploy && remix vite:build`)
+- `prisma/schema.prisma` geri yüklendi (db pull sonrası bozulmuştu)
+- Prisma client v6.19.2 başarıyla generate edildi
+- Vercel'e deploy yapıldı (Remix preset) — GitHub'a push ile otomatik
+- Shopify Partners'a app deploy edildi (v2: achty-ai-ai-recommends-you-2)
+- GitHub'a tüm değişiklikler push yapıldı (commit: a3f3410)
 
 ❌ Kalan:
-1.  `.env` dosyasına `DATABASE_URL` eklenmesi gerekiyor (Supabase şifresi gerekli).
-2.  Vercel'de `SHOPIFY_APP_URL=https://achty-shopify.vercel.app` ortam değişkeni eklenmeli.
-3.  Partners Dashboard'dan GDPR webhook URL'leri girilmeli (üçü de `https://achty-shopify.vercel.app/webhooks`).
-4.  Dev store'da test kurulumu yapılmalı (`achty-dev.myshopify.com`).
-5.  `BILLING_TEST_MODE` production'da `false` yapılmalı (gerçek ödeme alınacaksa).
-6.  Gerçek AI entegrasyonu (OpenAI/Gemini) bağlanmalı — şu an skorlar rastgele üretiliyor.
-7.  Shopify App Store review'a gönderilmeli.
+1.  **Vercel Ortam Değişkenleri** — Aşağıdaki değişkenlerin Vercel Dashboard'da doğru olduğundan emin olunmalı:
+    - `DATABASE_URL` = `postgresql://postgres:[SIFRE_ENCODED]@db.fympfizkmpulwdvjmvlf.supabase.co:5432/postgres`
+    - `SHOPIFY_APP_URL` = `https://achty-shopify.vercel.app`
+    - `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `BILLING_TEST_MODE`
+2.  **GDPR Webhook URL'leri** — Partners Dashboard → App → Configuration → Privacy compliance:
+    - Customer data request → `https://achty-shopify.vercel.app/webhooks`
+    - Customer data erasure → `https://achty-shopify.vercel.app/webhooks`
+    - Shop data erasure → `https://achty-shopify.vercel.app/webhooks`
+3.  **Dev Store Test** — `achty-dev.myshopify.com` üzerinde uygulama kurulumu ve test.
+4.  **BILLING_TEST_MODE** — Production'da `false` yapılmalı (gerçek ödeme alınacaksa).
+5.  **Gerçek AI Entegrasyonu** — OpenAI/Gemini bağlanmalı (şu an skorlar rastgele üretiliyor).
+6.  **Shopify App Store Review** — Uygulama incelemeye gönderilmeli.
