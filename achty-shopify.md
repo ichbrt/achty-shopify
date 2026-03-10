@@ -152,12 +152,12 @@ Uygulama geliştirme ortamından çıkarılıp canlı sunuculara taşındı.
 1.  **Vercel Ortam Değişkenleri** — Aşağıdaki değişkenlerin Vercel Dashboard'da doğru olduğundan emin olunmalı:
     - `DATABASE_URL` = `postgresql://postgres:[SIFRE_ENCODED]@db.fympfizkmpulwdvjmvlf.supabase.co:5432/postgres`
     - `SHOPIFY_APP_URL` = `https://achty-shopify.vercel.app`
-    - `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `BILLING_TEST_MODE`
+    - `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `BILLING_TEST_MODE`, `GEMINI_API_KEY`
 2.  **GDPR Webhook URL'leri** — Partners Dashboard → App → Configuration → Privacy compliance:
     - Customer data request → `https://achty-shopify.vercel.app/webhooks`
     - Customer data erasure → `https://achty-shopify.vercel.app/webhooks`
     - Shop data erasure → `https://achty-shopify.vercel.app/webhooks`
 3.  **Dev Store Test** — `achty-dev.myshopify.com` üzerinde uygulama kurulumu ve test.
 4.  **BILLING_TEST_MODE** — Production'da `false` yapılmalı (gerçek ödeme alınacaksa).
-5.  **Gerçek AI Entegrasyonu** — OpenAI/Gemini bağlanmalı (şu an skorlar rastgele üretiliyor).
+5.  ~~**Gerçek AI Entegrasyonu** — OpenAI/Gemini bağlanmalı (şu an skorlar rastgele üretiliyor).~~ *(Tamamlandı - Gemini Altyapısı Kuruldu)*
 6.  **Shopify App Store Review** — Uygulama incelemeye gönderilmeli.

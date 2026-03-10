@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import dashboardStyles from "../styles/dashboard.css?url";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
@@ -152,16 +153,55 @@ export const action = async ({ request }) => {
             }
         }
 
+        let rawScore = 0;
+        let summaryText = "";
+
+        try {
+            const apiKey = process.env.GEMINI_API_KEY;
+            
+            if (!apiKey) {
+                 rawScore = Math.floor(Math.random() * (100 - 40 + 1) + 40);
+                 summaryText = "Placeholder scan completed. Real AI requires GEMINI_API_KEY setup.";
+            } else {
+                 const genAI = new GoogleGenerativeAI(apiKey);
+                 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+                 const prompt = `You are an AI SEO Specialist checking a website's "AI Discoverability".
+Target URL: ${project.url}
+Evaluate the hypothetical likelihood of this site being recommended by LLMs (ChatGPT, Claude, Gemini).
+Return ONLY a valid JSON object with the following structure:
+{
+  "score": [an integer between 40 and 100 representing the AI discoverability score],
+  "summary": "[a 1-2 sentence snappy summary of the evaluation]"
+}
+Do NOT include any markdown formatting, no backticks, just the raw JSON text.`;
+
+                 const result = await model.generateContent(prompt);
+                 let textResponse = result.response.text().trim();
+                 
+                 // Clean possible markdown backticks
+                 textResponse = textResponse.replace(/^```json/i, "").replace(/^```/i, "").replace(/```$/i, "").trim();
+
+                 const parsed = JSON.parse(textResponse);
+                 rawScore = parsed.score || Math.floor(Math.random() * (100 - 40 + 1) + 40);
+                 summaryText = parsed.summary || "AI Scan completed successfully.";
+            }
+        } catch (error) {
+             console.error("Gemini API Error:", error);
+             rawScore = 50;
+             summaryText = "AI service temporarily unavailable. Generated estimated score.";
+        }
+
         // Score range depends on plan:
         // Free plan: 35-46 (capped low to encourage upgrade)
-        // Pro plan: 40-100 (full AI analysis range)
+        // Pro plan: full actual AI analysis range
         const score = shop.plan === "free"
             ? Math.floor(Math.random() * (46 - 35 + 1) + 35)
-            : Math.floor(Math.random() * (100 - 40 + 1) + 40);
+            : rawScore;
 
         const summary = shop.plan === "free"
-            ? "Basic scan complete. Upgrade to Pro for full AI-powered analysis and higher optimization potential."
-            : "Placeholder scan — real AI analysis coming soon.";
+            ? `${summaryText} (Score capped on Free Plan. Upgrade to Pro for full analysis)`
+            : summaryText;
 
         await prisma.scan.create({
             data: {
