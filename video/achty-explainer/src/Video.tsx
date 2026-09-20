@@ -137,7 +137,7 @@ const Scene1:React.FC<{duration:number}> = ({duration})=>{
   const f=useCurrentFrame();
   const sweep=(f*7)%620;
   return <div style={{position:'absolute',left:850,top:185,width:940,height:670,opacity:fade(f,duration)}}>
-    <Glow x={470} y={330} size={700} color={C.cyan} opacity=.13/>
+    <Glow x={470} y={330} size={700} color={C.cyan} opacity={0.13}/>
     <Glass style={{height:'100%',padding:34,position:'relative',overflow:'hidden'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <div><div style={{fontSize:18,color:C.muted}}>PROJECT</div><div style={{fontSize:28,fontWeight:800,marginTop:5}}>yourbrand.com</div></div>
@@ -183,7 +183,7 @@ const Scene3:React.FC<{duration:number}> = ({duration})=>{
  const agents=['Stratejist','Araştırmacı','İçerik','SEO','Doğrulayıcı','Trend'];
  const cx=1320,cy=535,rad=260;
  return <div style={{position:'absolute',inset:0,opacity:fade(f,duration)}}>
-   <Glow x={cx} y={cy} size={620} color={C.violet} opacity=.18/>
+   <Glow x={cx} y={cy} size={620} color={C.violet} opacity={0.18}/>
    <svg width="1920" height="1080" style={{position:'absolute',inset:0}}>
      {agents.map((_,i)=>{const a=(Math.PI*2*i/agents.length)-Math.PI/2;const x=cx+Math.cos(a)*rad;const y=cy+Math.sin(a)*rad;const dash=interpolate(f,[15+i*4,70+i*4],[420,0],{extrapolateRight:'clamp'});return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke="rgba(81,200,255,.35)" strokeWidth="2" strokeDasharray="420" strokeDashoffset={dash}/>})}
    </svg>
@@ -196,7 +196,7 @@ const Scene4:React.FC<{duration:number}> = ({duration})=>{
  const f=useCurrentFrame(); const center={x:1320,y:530};
  const nodes=[['Organization',0,-250],['Service',260,-120],['Person',280,150],['Location',0,270],['Topic',-270,145],['WebSite',-280,-130]];
  return <div style={{position:'absolute',inset:0,opacity:fade(f,duration)}}>
-  <Glow x={center.x} y={center.y} size={700} color={C.cyan} opacity=.14/>
+  <Glow x={center.x} y={center.y} size={700} color={C.cyan} opacity={0.14}/>
   <svg width="1920" height="1080" style={{position:'absolute',inset:0}}>
    {nodes.map((n,i)=>{const x=center.x+(n[1] as number);const y=center.y+(n[2] as number);return <line key={i} x1={center.x} y1={center.y} x2={x} y2={y} stroke="rgba(139,92,246,.38)" strokeWidth="3"/>})}
   </svg>
@@ -263,7 +263,7 @@ const Scene8:React.FC<{duration:number}> = ({duration})=>{
 const Scene9:React.FC<{duration:number}> = ({duration})=>{
  const f=useCurrentFrame(); const s=spring({frame:f-8,fps:30,config:{damping:17,stiffness:90}});
  return <div style={{position:'absolute',left:860,top:260,width:880,height:470,opacity:fade(f,duration),transform:'scale('+(.93+.07*s)+')'}}>
-   <Glow x={440} y={220} size={900} color={C.violet} opacity=.26/>
+   <Glow x={440} y={220} size={900} color={C.violet} opacity={0.26}/>
    <Glass style={{height:'100%',display:'grid',placeItems:'center',textAlign:'center',padding:50,border:'1px solid rgba(41,217,255,.28)'}}>
     <div>
       <div style={{fontSize:30,fontWeight:900,letterSpacing:1}}>ACHTy <span style={{color:C.cyan}}>AI</span></div>
@@ -288,8 +288,8 @@ export const ACHTyVideo:React.FC = () => {
  const progress=interpolate(frame,[0,TOTAL_FRAMES],[0,1],{extrapolateRight:'clamp'});
  return <AbsoluteFill style={{fontFamily:font,color:C.text,background:C.bg,overflow:'hidden'}}>
   <Grid/>
-  <Glow x={1600} y={150} size={900} color={C.violet} opacity=.10/>
-  <Glow x={250} y={930} size={800} color={C.cyan} opacity=.07/>
+  <Glow x={1600} y={150} size={900} color={C.violet} opacity={0.10}/>
+  <Glow x={250} y={930} size={800} color={C.cyan} opacity={0.07}/>
   <Header index={active}/>
   {SCENE_DURATIONS.map((dur,i)=><Sequence key={i} from={SCENE_STARTS[i]} durationInFrames={dur}>
     <SceneText index={i} duration={dur}/>
