@@ -284,7 +284,7 @@ const SceneVisual:React.FC<{index:number;duration:number}> = ({index,duration})=
 export const ACHTyVideo:React.FC = () => {
  const frame=useCurrentFrame();
  const {fps}=useVideoConfig();
- const active=SCENE_STARTS.reduce((acc,start,i)=>frame>=start?i:acc,0);
+ const active=SCENE_STARTS.reduce<number>((acc,start,i)=>frame>=start?i:acc,0);
  const progress=interpolate(frame,[0,TOTAL_FRAMES],[0,1],{extrapolateRight:'clamp'});
  return <AbsoluteFill style={{fontFamily:font,color:C.text,background:C.bg,overflow:'hidden'}}>
   <Grid/>
