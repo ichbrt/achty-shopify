@@ -1,0 +1,58 @@
+name: ACHTy Premium Explainer
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "video/achty-explainer/**"
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: video/achty-explainer/package.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg chromium-browser || sudo apt-get install -y ffmpeg chromium
+
+      - name: Install Python voice dependency
+        run: python -m pip install edge-tts==7.2.8
+
+      - name: Install Remotion dependencies
+        working-directory: video/achty-explainer
+        run: npm install
+
+      - name: Generate natural Turkish narration
+        working-directory: video/achty-explainer
+        run: python scripts/build_audio.py
+
+      - name: Typecheck
+        working-directory: video/achty-explainer
+        run: npx tsc --noEmit
+
+      - name: Render 1080p H.264
+        working-directory: video/achty-explainer
+        env:
+          REMOTION_BROWSER_EXECUTABLE: /usr/bin/chromium
+        run: |
+          mkdir -p out
+          npx remotion render src/index.ts ACHTyPremium out/achty-premium.mp4 --codec=h264 --concurrency=2 --crf=18
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: achty-premium-explainer
+          path: video/achty-explainer/out/achty-premium.mp4
+          retention-days: 7
