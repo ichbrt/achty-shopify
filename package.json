@@ -2,7 +2,7 @@
     "name": "achty-shopify",
     "private": true,
     "scripts": {
-        "build": "prisma generate && prisma migrate deploy && remix vite:build",
+        "build": "prisma generate && remix vite:build",
         "dev": "shopify app dev",
         "lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
         "shopify": "shopify",
@@ -12,7 +12,7 @@
     },
     "type": "module",
     "engines": {
-        "node": ">=18.0.0"
+        "node": "22.x"
     },
     "dependencies": {
         "@google/generative-ai": "^0.24.1",
