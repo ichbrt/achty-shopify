@@ -134,30 +134,29 @@ Uygulama geliştirme ortamından çıkarılıp canlı sunuculara taşındı.
 
 ---
 
-**Mevcut Durum & Kalan Adımlar** *(9 Mart 2026)*
+**Mevcut Durum & Kalan Adımlar** *(24 Kasım 2026 Güncellemesi)*
 
-✅ Tamamlanan:
-- Tüm güvenlik düzeltmeleri (erişim kontrolü, API secret, GDPR, input validation)
-- Fiyatlandırma: Pro $199.90/ay, Free 1 scan (skor 35-46)
-- Supabase PostgreSQL veritabanı kuruldu ve migration uygulandı
-- Lokal `.env` dosyası tamamlandı (DATABASE_URL, API keys, scopes hepsi mevcut)
-- `package.json` build script'i güncellendi (`prisma generate && prisma migrate deploy && remix vite:build`)
-- `prisma/schema.prisma` geri yüklendi (db pull sonrası bozulmuştu)
-- Prisma client v6.19.2 başarıyla generate edildi
-- Vercel'e deploy yapıldı (Remix preset) — GitHub'a push ile otomatik
-- Shopify Partners'a app deploy edildi (v2: achty-ai-ai-recommends-you-2)
-- GitHub'a tüm değişiklikler push yapıldı (commit: a3f3410)
+✅ Tamamlanan (App Store Review Hazırlık Paketi — `fe202c9`, `e59f81a`):
+- **Gerçek GEO / AI Discoverability Audit Motoru (`app/services/geo-audit.server.js`):**
+  - Shopify Admin GraphQL (`read_products`, `read_content`, `read_themes`) + canlı mağaza taraması (`robots.txt` AI botları, `/llms.txt`, JSON-LD şemaları, metadata/sitemap, ürün kataloğu hazırlığı).
+  - Sahte/rastgele "Placeholder" ve Free plan yapay düşük skor (35-46) kaldırıldı; dürüst, tekrarlanabilir 0-100 puanlama + gerçek `ScanResult` kayıtları + otomatik mağaza `llms.txt` şablonu eklendi.
+  - Eski `gemini-1.5-flash` yerine `gemini-2.5-flash` (isteğe bağlı zenginleştirme, `GEMINI_API_KEY` yoksa bile tam teknik rapor üretir).
+- **Shopify App Store Review Düzeltmeleri:**
+  - `app/routes/auth.login.jsx`: POST `/auth/login` 405 hatası giderildi, Polaris login ekranı eklendi.
+  - `app/routes/app.billing.jsx`: Yeni kurulumda `prisma.shop.update` P2025 çökme hatası `upsert` ile giderildi, aksiyon bildirimleri eklendi.
+  - `app/routes/app._index.jsx`: Engelleyen WebGL splash ekranı ve CSP ihlali (`new Function`), ayrıca iframe içi `alert()`/`prompt()`/`confirm()` çağrıları tamamen kaldırılıp inline UI ile değiştirildi.
+  - `app/routes/privacy.jsx`: Canlı GDPR Gizlilik Politikası sayfası eklendi (`https://achty-shopify.vercel.app/privacy` → HTTP 200).
+  - `shopify.app.toml`: Zorunlu GDPR `compliance_topics` (`customers/data_request`, `customers/redact`, `shop/redact`) eklendi.
+  - `package.json`: 259 gündür Vercel build'i kıran build-time `prisma migrate deploy` kaldırıldı ve Node `22.x` sabitlendi → **Vercel Production Deploy (`https://achty-shopify.vercel.app`) artık `Ready` ✅**.
 
-❌ Kalan:
-1.  **Vercel Ortam Değişkenleri** — Aşağıdaki değişkenlerin Vercel Dashboard'da doğru olduğundan emin olunmalı:
-    - `DATABASE_URL` = `postgresql://postgres:[SIFRE_ENCODED]@db.fympfizkmpulwdvjmvlf.supabase.co:5432/postgres`
-    - `SHOPIFY_APP_URL` = `https://achty-shopify.vercel.app`
-    - `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `BILLING_TEST_MODE`, `GEMINI_API_KEY`
-2.  **GDPR Webhook URL'leri** — Partners Dashboard → App → Configuration → Privacy compliance:
-    - Customer data request → `https://achty-shopify.vercel.app/webhooks`
-    - Customer data erasure → `https://achty-shopify.vercel.app/webhooks`
-    - Shop data erasure → `https://achty-shopify.vercel.app/webhooks`
-3.  **Dev Store Test** — `achty-dev.myshopify.com` üzerinde uygulama kurulumu ve test.
-4.  **BILLING_TEST_MODE** — Production'da `false` yapılmalı (gerçek ödeme alınacaksa).
-5.  ~~**Gerçek AI Entegrasyonu** — OpenAI/Gemini bağlanmalı (şu an skorlar rastgele üretiliyor).~~ *(Tamamlandı - Gemini Altyapısı Kuruldu)*
-6.  **Shopify App Store Review** — Uygulama incelemeye gönderilmeli.
+❌ Kalan (Yalnızca 3 Dakikalık Son İşlemler):
+1.  **Veritabanı (Supabase / PostgreSQL) Aktivasyonu & Vercel `DATABASE_URL`:**
+    - Eski Supabase projesi (`db.fympfizkmpulwdvjmvlf.supabase.co`) uzun süre pasif kaldığı için duraklatılmış/DNS kapalı görünüyor ve Vercel'deki `DATABASE_URL` hâlâ eski `postgresql://` dışı değerde (`P1012`).
+    - Supabase panelinden projeyi **Restore/Unpause** et (veya yeni PostgreSQL / Neon DB oluştur), **IPv4 Pooler `postgresql://...`** bağlantısını Vercel → `achty-shopify` → Environment Variables → `DATABASE_URL` alanına yapıştır ve lokalden 1 kez `npx prisma migrate deploy` çalıştır.
+2.  **Vercel Ortam Değişkenleri & Canlı Ödeme:**
+    - İsteğe bağlı olarak `GEMINI_API_KEY` ekle (eklenmese bile gerçek teknik GEO taraması çalışır; eklenince Gemini 2.5 Flash yönetici özeti eklenir).
+    - Canlı mağazalardan $199.90/ay gerçek tahsilat için `BILLING_TEST_MODE=false` yap ve Vercel'de redeploy et.
+3.  **Shopify Partners & App Store Başvurusu:**
+    - Terminalden `npx shopify app deploy` çalıştırarak güncellenen GDPR `compliance_topics` ayarını Partners'a gönder.
+    - `achty-dev.myshopify.com` üzerinde 1 dakikalık kurulum + tarama + billing akışını test et.
+    - Partners Dashboard → App Store Listing içinde Privacy Policy URL olarak `https://achty-shopify.vercel.app/privacy` girip **Submit for Review**'a bas.
