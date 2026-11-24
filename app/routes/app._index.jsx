@@ -1,53 +1,89 @@
 import { json } from "@remix-run/node";
-import { useLoaderData, useSubmit, useNavigation, useActionData } from "@remix-run/react";
-import { useState, useEffect, useRef } from "react";
+import { Link, useActionData, useLoaderData, useNavigation, useSubmit } from "@remix-run/react";
+import { useState } from "react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { buildLlmsTxtTemplate, runRealGeoAudit } from "../services/geo-audit.server";
 import dashboardStyles from "../styles/dashboard.css?url";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
+const FREE_SCAN_LIMIT = 3;
+
 export const loader = async ({ request }) => {
-    const { session } = await authenticate.admin(request);
+    const { session, admin } = await authenticate.admin(request);
     const shop = session.shop;
 
-    let shopRecord = await prisma.shop.findUnique({
+    const shopRecord = await prisma.shop.upsert({
         where: { shopDomain: shop },
+        update: {},
+        create: {
+            shopDomain: shop,
+            shopName: shop.replace(".myshopify.com", ""),
+        },
         include: {
             projects: {
+                orderBy: { createdAt: "desc" },
                 include: {
                     scans: {
                         orderBy: { createdAt: "desc" },
                         take: 1,
+                        include: {
+                            results: {
+                                orderBy: { createdAt: "asc" },
+                            },
+                        },
                     },
                 },
             },
         },
     });
 
-    if (!shopRecord) {
-        shopRecord = await prisma.shop.create({
-            data: {
-                shopDomain: shop,
-                shopName: shop.replace(".myshopify.com", ""),
-            },
-            include: {
-                projects: {
-                    include: {
-                        scans: {
-                            orderBy: { createdAt: "desc" },
-                            take: 1,
-                        },
-                    },
-                },
-            },
-        });
+    // Fetch storefront primary domain & basic store data for accurate default tracking & llms.txt preview
+    let primaryHost = shop;
+    let storeData = null;
+    try {
+        const res = await admin.graphql(`#graphql
+            query AchtyDashboardStoreInfo {
+                shop {
+                    name
+                    description
+                    primaryDomain {
+                        url
+                        host
+                    }
+                }
+                products(first: 8) {
+                    nodes {
+                        title
+                        handle
+                        description
+                        seo {
+                            description
+                        }
+                    }
+                }
+                pages(first: 5) {
+                    nodes {
+                        title
+                        handle
+                    }
+                }
+            }
+        `);
+        const parsed = await res.json();
+        storeData = parsed?.data || null;
+        if (storeData?.shop?.primaryDomain?.host) {
+            primaryHost = storeData.shop.primaryDomain.host;
+        }
+    } catch {
+        // Non-fatal; fall back to session.shop
     }
 
     const latestScans = shopRecord.projects
         .map((p) => p.scans[0])
         .filter((s) => s && s.score != null);
+
     const avgScore =
         latestScans.length > 0
             ? Math.round(
@@ -56,56 +92,85 @@ export const loader = async ({ request }) => {
             )
             : null;
 
+    const latestScanIds = latestScans.map((s) => s.id);
+    const [totalScans, passedChecks, riskAlerts] = await Promise.all([
+        prisma.scan.count({
+            where: { project: { shopId: shopRecord.id } },
+        }),
+        latestScanIds.length > 0
+            ? prisma.scanResult.count({
+                where: { scanId: { in: latestScanIds }, mentioned: true },
+            })
+            : 0,
+        latestScanIds.length > 0
+            ? prisma.scanResult.count({
+                where: { scanId: { in: latestScanIds }, sentiment: "negative" },
+            })
+            : 0,
+    ]);
+
+    const llmsPreview = buildLlmsTxtTemplate({
+        domain: primaryHost,
+        storeData,
+    });
+
     return json({
         shop: shopRecord,
         projects: shopRecord.projects,
+        primaryHost,
         avgScore,
-        totalScans: await prisma.scan.count({
-            where: {
-                project: { shopId: shopRecord.id },
-            },
-        }),
-        totalMentions: await prisma.scanResult.count({
-            where: {
-                scan: { project: { shopId: shopRecord.id } },
-                mentioned: true,
-            },
-        }),
+        totalScans,
+        passedChecks,
+        riskAlerts,
+        llmsPreview,
+        freeScanLimit: FREE_SCAN_LIMIT,
     });
 };
 
 export const action = async ({ request }) => {
-    const { session } = await authenticate.admin(request);
+    const { session, admin } = await authenticate.admin(request);
     const formData = await request.formData();
     const actionType = formData.get("action");
 
-    // Get current shop record for ownership verification
-    const shop = await prisma.shop.findUnique({
+    const shop = await prisma.shop.upsert({
         where: { shopDomain: session.shop },
-        include: { projects: true }
+        update: {},
+        create: {
+            shopDomain: session.shop,
+            shopName: session.shop.replace(".myshopify.com", ""),
+        },
+        include: { projects: true },
     });
 
-    if (!shop) {
-        return json({ error: "Shop not found" }, { status: 404 });
-    }
-
     if (actionType === "addProject") {
-        const rawUrl = formData.get("url")?.trim();
-        const name = formData.get("name")?.trim() || rawUrl;
+        const rawUrl = formData.get("url")?.toString().trim();
+        const name = formData.get("name")?.toString().trim() || rawUrl;
 
         if (!rawUrl) {
-            return json({ error: "URL is required" }, { status: 400 });
+            return json({ error: "Please enter a domain to monitor." }, { status: 400 });
         }
 
-        // Validate and sanitize URL
-        const cleanUrl = rawUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-        const domainRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$/;
+        const cleanUrl = rawUrl.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").trim().toLowerCase();
+        const domainRegex = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
         if (!domainRegex.test(cleanUrl)) {
-            return json({ error: "Invalid domain", message: "Please enter a valid domain (e.g., myshop.com)" }, { status: 400 });
+            return json(
+                { error: "Please enter a valid domain (e.g., myshop.com or myshop.myshopify.com)." },
+                { status: 400 }
+            );
+        }
+
+        if (shop.projects.some((p) => p.url.toLowerCase() === cleanUrl)) {
+            return json({ error: `${cleanUrl} is already being tracked.` }, { status: 400 });
         }
 
         if (shop.projects.length >= 1 && shop.plan === "free") {
-            return json({ error: "Plan limit reached", message: "Free plan only allows 1 tracked domain. Please upgrade to Pro." }, { status: 403 });
+            return json(
+                {
+                    error: "Starter plan tracks 1 domain. Upgrade to Pro to monitor unlimited store & competitor domains.",
+                    upgradeCta: true,
+                },
+                { status: 403 }
+            );
         }
 
         await prisma.project.create({
@@ -115,416 +180,230 @@ export const action = async ({ request }) => {
                 name: name.substring(0, 100),
             },
         });
+
+        return json({ success: true, message: `Added ${cleanUrl}. Run an AI Visibility Audit to inspect live signals.` });
     }
 
     if (actionType === "deleteProject") {
-        const projectId = formData.get("projectId");
-
-        // Verify project belongs to this shop
-        const project = shop.projects.find(p => p.id === projectId);
+        const projectId = formData.get("projectId")?.toString();
+        const project = shop.projects.find((p) => p.id === projectId);
         if (!project) {
-            return json({ error: "Project not found or access denied" }, { status: 403 });
+            return json({ error: "Project not found or access denied." }, { status: 403 });
         }
 
-        await prisma.project.delete({
-            where: { id: projectId }
-        });
+        await prisma.project.delete({ where: { id: projectId } });
+        return json({ success: true, message: `Removed ${project.url} from tracked stores.` });
     }
 
     if (actionType === "quickScan") {
-        const projectId = formData.get("projectId");
-
-        // Verify project belongs to this shop
-        const project = shop.projects.find(p => p.id === projectId);
+        const projectId = formData.get("projectId")?.toString();
+        const project = shop.projects.find((p) => p.id === projectId);
         if (!project) {
-            return json({ error: "Project not found or access denied" }, { status: 403 });
+            return json({ error: "Project not found or access denied." }, { status: 403 });
         }
 
-        // Free plan: only 1 scan allowed total
         if (shop.plan === "free") {
             const existingScanCount = await prisma.scan.count({
-                where: { project: { shopId: shop.id } }
+                where: { project: { shopId: shop.id } },
             });
-            if (existingScanCount >= 1) {
-                return json({
-                    error: "Scan limit reached",
-                    message: "Free plan allows only 1 scan. Upgrade to Pro for unlimited scans."
-                }, { status: 403 });
+            if (existingScanCount >= FREE_SCAN_LIMIT) {
+                return json(
+                    {
+                        error: `Starter plan includes ${FREE_SCAN_LIMIT} full AI readiness audits. Upgrade to Pro for unlimited scans.`,
+                        upgradeCta: true,
+                    },
+                    { status: 403 }
+                );
             }
         }
 
-        let rawScore = 0;
-        let summaryText = "";
-
-        try {
-            const apiKey = process.env.GEMINI_API_KEY;
-            
-            if (!apiKey) {
-                 rawScore = Math.floor(Math.random() * (100 - 40 + 1) + 40);
-                 summaryText = "Placeholder scan completed. Real AI requires GEMINI_API_KEY setup.";
-            } else {
-                 const genAI = new GoogleGenerativeAI(apiKey);
-                 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-                 const prompt = `You are an AI SEO Specialist checking a website's "AI Discoverability".
-Target URL: ${project.url}
-Evaluate the hypothetical likelihood of this site being recommended by LLMs (ChatGPT, Claude, Gemini).
-Return ONLY a valid JSON object with the following structure:
-{
-  "score": [an integer between 40 and 100 representing the AI discoverability score],
-  "summary": "[a 1-2 sentence snappy summary of the evaluation]"
-}
-Do NOT include any markdown formatting, no backticks, just the raw JSON text.`;
-
-                 const result = await model.generateContent(prompt);
-                 let textResponse = result.response.text().trim();
-                 
-                 // Clean possible markdown backticks
-                 textResponse = textResponse.replace(/^```json/i, "").replace(/^```/i, "").replace(/```$/i, "").trim();
-
-                 const parsed = JSON.parse(textResponse);
-                 rawScore = parsed.score || Math.floor(Math.random() * (100 - 40 + 1) + 40);
-                 summaryText = parsed.summary || "AI Scan completed successfully.";
-            }
-        } catch (error) {
-             console.error("Gemini API Error:", error);
-             rawScore = 50;
-             summaryText = "AI service temporarily unavailable. Generated estimated score.";
-        }
-
-        // Score range depends on plan:
-        // Free plan: 35-46 (capped low to encourage upgrade)
-        // Pro plan: full actual AI analysis range
-        const score = shop.plan === "free"
-            ? Math.floor(Math.random() * (46 - 35 + 1) + 35)
-            : rawScore;
-
-        const summary = shop.plan === "free"
-            ? `${summaryText} (Score capped on Free Plan. Upgrade to Pro for full analysis)`
-            : summaryText;
+        const audit = await runRealGeoAudit({
+            admin,
+            domain: project.url,
+            shopDomain: session.shop,
+        });
 
         await prisma.scan.create({
             data: {
-                projectId: projectId,
+                projectId: project.id,
                 status: "completed",
-                score,
-                summary,
+                score: audit.score,
+                summary: audit.summary,
+                completedAt: new Date(),
+                results: {
+                    create: audit.checks.map((check) => ({
+                        platform: check.platform,
+                        prompt: check.prompt,
+                        response: check.response,
+                        mentioned: check.mentioned,
+                        sentiment: check.sentiment,
+                        position: check.position,
+                    })),
+                },
             },
+        });
+
+        return json({
+            success: true,
+            message: `Completed live AI Visibility Audit for ${project.url} — Score: ${audit.score}/100.`,
         });
     }
 
-    return json({ success: true });
+    return json({ error: "Unknown action." }, { status: 400 });
 };
 
-
-function TubesBackground({ children }) {
-    const canvasRef = useRef(null);
-    const [isLoaded, setIsLoaded] = useState(false);
-    const tubesRef = useRef(null);
-
-    useEffect(() => {
-        let mounted = true;
-
-        const randomColors = (count) => {
-            return new Array(count)
-                .fill(0)
-                .map(() => '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0'));
-        };
-
-        const initTubes = async () => {
-            if (!canvasRef.current) return;
-
-            try {
-                // Use runtime import to bypass bundlers and correctly load the ES module
-                const dynamicImport = new Function('url', 'return import(url)');
-                // We stored it locally at /tubes1.min.js
-                const module = await dynamicImport('/tubes1.min.js');
-                const TubesCursor = module.default;
-
-                if (!mounted || !TubesCursor) {
-                    setIsLoaded(true);
-                    return;
-                }
-
-                const app = TubesCursor(canvasRef.current, {
-                    tubes: {
-                        colors: ['#f967fb', '#53bc28', '#6958d5'],
-                        lights: {
-                            intensity: 200,
-                            colors: ['#83f36e', '#fe8a2e', '#ff008a', '#60aed5'],
-                        },
-                    },
-                });
-
-                tubesRef.current = app;
-                setIsLoaded(true);
-
-                // Allow canvas to be clicked to trigger color changes
-                const clickHandler = () => {
-                    if (tubesRef.current) {
-                        tubesRef.current.tubes.setColors(randomColors(3));
-                        tubesRef.current.tubes.setLightsColors(randomColors(4));
-                    }
-                };
-                canvasRef.current.addEventListener('click', clickHandler);
-
-
-            } catch (error) {
-                console.error('Failed to load TubesCursor:', error);
-            }
-        };
-
-        initTubes();
-
-        return () => {
-            mounted = false;
-        };
-    }, []);
-
-    return (
-        <div className="tubes-container">
-            <canvas
-                ref={canvasRef}
-                className="tubes-canvas"
-            />
-            {/* Fade in content once Tubes is ready or just show it anyway */}
-            <div
-                className="splash-content-wrapper"
-                style={{ opacity: isLoaded ? 1 : 0, transition: 'opacity 1s ease-in-out' }}
-            >
-                {children}
-            </div>
-
-            {!isLoaded && (
-                <div className="splash-loading">
-                    <img src="/achty-logo.png" alt="Loading" />
-                    <p>Loading...</p>
-                </div>
-            )}
-        </div>
-    );
-}
-
-function AiSeoPanel({ project, lastScan, onScan }) {
-    const [phase, setPhase] = useState(lastScan ? 'active' : 'idle');
-    const [stepIndex, setStepIndex] = useState(-1);
-
-    const steps = [
-        'Crawling site footprint...',
-        'Analyzing keyword intent...',
-        'Validating AI recommendations...',
-        'Scoring visibility...',
-        'Generating insights...'
-    ];
-
-    const canvasRef = useRef(null);
-    const score = lastScan?.score || 0;
-
-    // Simple heartbeat animation when active
-    useEffect(() => {
-        if (phase !== 'active' || !canvasRef.current) return;
-
-        let req;
-        const ctx = canvasRef.current.getContext('2d');
-        let offset = 0;
-
-        const draw = () => {
-            const w = canvasRef.current.width;
-            const h = canvasRef.current.height;
-            ctx.clearRect(0, 0, w, h);
-
-            ctx.beginPath();
-            ctx.strokeStyle = '#10b981';
-            ctx.lineWidth = 1.5;
-
-            for (let x = 0; x < w; x++) {
-                const adjX = (x + offset) % (w + 50);
-                const pos = adjX % 100;
-                let y = h / 2;
-
-                if (pos > 40 && pos < 45) {
-                    y -= (pos - 40) * 8;
-                } else if (pos >= 45 && pos < 55) {
-                    y += (pos - 50) * 8;
-                } else if (pos >= 55 && pos < 60) {
-                    y -= (pos - 60) * 8;
-                }
-
-                if (x === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-
-            ctx.stroke();
-            offset += 0.5;
-            req = requestAnimationFrame(draw);
-        };
-        draw();
-
-        return () => cancelAnimationFrame(req);
-    }, [phase]);
-
-    const handleStart = async () => {
-        setPhase('running');
-        setStepIndex(0);
-
-        for (let i = 0; i < steps.length; i++) {
-            setStepIndex(i);
-            await new Promise(r => setTimeout(r, 700 + Math.random() * 500));
-        }
-
-        // Finalize scan in DB via parent
-        onScan(project.id);
-
-        // Normally this would wait for the result to come back from action, but since it reloads the page, it will come back as active
-        setPhase('active');
-    };
-
-    if (phase === 'idle') {
+function AuditResultsPanel({ project, lastScan, isScanning, onScan }) {
+    if (!lastScan) {
         return (
             <div className="ai-seo-panel">
-                <button className="ai-seo-idle-btn" onClick={handleStart}>
-                    ⚡ Start ACHTy AI SEO Optimizer
+                <button
+                    className="ai-seo-idle-btn"
+                    disabled={isScanning}
+                    onClick={() => onScan(project.id)}
+                >
+                    {isScanning ? "⚡ Auditing Storefront Signals..." : "⚡ Run Live AI Visibility Audit"}
                 </button>
             </div>
         );
     }
 
-    if (phase === 'running') {
-        return (
-            <div className="ai-seo-panel">
-                <div className="ai-seo-running-box">
-                    <div style={{ color: '#34d399', fontWeight: 'bold', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <svg className="w-5 h-5 text-white animate-spin" viewBox="0 0 24 24" style={{ width: 16, height: 16 }}>
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                        Running AI SEO Analysis...
-                    </div>
-                    {steps.map((text, i) => {
-                        const status = i < stepIndex ? 'completed' : i === stepIndex ? 'running' : 'pending';
-                        return (
-                            <div key={i} className={`ai-seo-step ${status}`}>
-                                {status === 'completed' && <span style={{ color: '#34d399' }}>&#10003;</span>}
-                                {status === 'running' && <span className="ai-seo-pulsing-dot" />}
-                                {status === 'pending' && <span style={{ width: '8px', height: '8px', border: '1px solid #71717a', borderRadius: '50%' }} />}
-                                {text}
-                            </div>
-                        )
-                    })}
-                </div>
-            </div>
-        );
-    }
+    const results = lastScan.results || [];
+    const passed = results.filter((r) => r.mentioned).length;
+    const issues = results.filter((r) => r.sentiment === "negative").length;
+    const warnings = results.filter((r) => r.sentiment === "warning").length;
 
     return (
         <div className="ai-seo-panel">
             <div className="ai-seo-active-box">
                 <div className="ai-seo-active-header">
                     <div className="ai-seo-active-title">
-                        <span className="ai-seo-pulsing-dot"></span>
-                        AI SEO Engine v2.0 Active
+                        <span className="ai-seo-pulsing-dot" />
+                        Live GEO Audit Report
                     </div>
-                    <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                        <button
-                            onClick={() => setPhase('idle')}
-                            style={{ background: 'transparent', border: 'none', color: '#ef4444', fontSize: '0.8rem', cursor: 'pointer', textDecoration: 'underline' }}
-                        >
-                            Stop Optimization
-                        </button>
-                        <div style={{ color: '#34d399', fontSize: '1.5rem', fontWeight: 'bold' }}>{score}/100</div>
+                    <div style={{ color: lastScan.score >= 70 ? "#34d399" : lastScan.score >= 45 ? "#fbbf24" : "#f87171", fontSize: "1.5rem", fontWeight: "bold" }}>
+                        {Math.round(lastScan.score || 0)}/100
                     </div>
                 </div>
 
-                <canvas ref={canvasRef} className="ai-seo-heartbeat-canvas" width="400" height="80" />
+                {lastScan.summary && (
+                    <p style={{ color: "#e4e4e7", fontSize: "0.92rem", lineHeight: 1.6, margin: "0.75rem 0 1rem" }}>
+                        {lastScan.summary}
+                    </p>
+                )}
 
-                <div className="ai-seo-metrics">
+                <div className="ai-seo-metrics" style={{ marginBottom: "1rem" }}>
                     <div className="ai-seo-metric-box">
-                        <div className="ai-seo-metric-val" style={{ color: '#34d399' }}>{score > 0 ? 12 : 0}</div>
-                        <div className="ai-seo-metric-lbl">Keywords</div>
+                        <div className="ai-seo-metric-val" style={{ color: "#34d399" }}>{passed}/{results.length || 5}</div>
+                        <div className="ai-seo-metric-lbl">Checks Passed</div>
                     </div>
                     <div className="ai-seo-metric-box">
-                        <div className="ai-seo-metric-val" style={{ color: '#60a5fa' }}>{score > 0 ? 4 : 0}</div>
-                        <div className="ai-seo-metric-lbl">Actions</div>
+                        <div className="ai-seo-metric-val" style={{ color: "#fbbf24" }}>{warnings}</div>
+                        <div className="ai-seo-metric-lbl">Warnings</div>
                     </div>
                     <div className="ai-seo-metric-box">
-                        <div className="ai-seo-metric-val" style={{ color: '#c084fc' }}>{score > 0 ? 1 : 0}</div>
-                        <div className="ai-seo-metric-lbl">Content Fix</div>
+                        <div className="ai-seo-metric-val" style={{ color: "#f87171" }}>{issues}</div>
+                        <div className="ai-seo-metric-lbl">Risk Alerts</div>
                     </div>
                     <div className="ai-seo-metric-box">
-                        <div className="ai-seo-metric-val" style={{ color: '#e8822a' }}>{score}%</div>
-                        <div className="ai-seo-metric-lbl">Health</div>
+                        <div className="ai-seo-metric-val" style={{ color: "#e8822a" }}>{Math.round(lastScan.score || 0)}%</div>
+                        <div className="ai-seo-metric-lbl">GEO Readiness</div>
                     </div>
                 </div>
+
+                {results.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>
+                        {results.map((r) => {
+                            const badgeColor =
+                                r.sentiment === "positive"
+                                    ? "#34d399"
+                                    : r.sentiment === "warning"
+                                        ? "#fbbf24"
+                                        : "#f87171";
+                            const statusIcon =
+                                r.sentiment === "positive" ? "✓" : r.sentiment === "warning" ? "!" : "✕";
+
+                            return (
+                                <div
+                                    key={r.id}
+                                    style={{
+                                        background: "rgba(255,255,255,0.03)",
+                                        border: "1px solid rgba(255,255,255,0.08)",
+                                        borderRadius: "10px",
+                                        padding: "0.75rem 1rem",
+                                    }}
+                                >
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.3rem" }}>
+                                        <span style={{ fontWeight: 600, color: "#f4f4f5", fontSize: "0.9rem" }}>
+                                            <span style={{ color: badgeColor, marginRight: "0.45rem" }}>{statusIcon}</span>
+                                            {r.platform}
+                                        </span>
+                                        <span style={{ color: badgeColor, fontWeight: 600, fontSize: "0.85rem" }}>
+                                            +{r.position ?? 0} pts
+                                        </span>
+                                    </div>
+                                    <div style={{ color: "#a1a1aa", fontSize: "0.83rem", lineHeight: 1.5 }}>
+                                        {r.response}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
         </div>
     );
 }
 
 export default function Dashboard() {
-    const { shop, projects, avgScore, totalScans, totalMentions } = useLoaderData();
+    const {
+        shop,
+        projects,
+        primaryHost,
+        avgScore,
+        totalScans,
+        passedChecks,
+        riskAlerts,
+        llmsPreview,
+        freeScanLimit,
+    } = useLoaderData();
     const actionData = useActionData();
     const submit = useSubmit();
     const navigation = useNavigation();
 
-    useEffect(() => {
-        if (actionData?.error) {
-            alert(actionData.message || actionData.error);
-        }
-    }, [actionData]);
-    const isLoading = navigation.state !== "idle";
+    const [showAddForm, setShowAddForm] = useState(false);
+    const [newDomain, setNewDomain] = useState("");
+    const [newName, setNewName] = useState("");
+    const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+    const [copiedLlms, setCopiedLlms] = useState(false);
 
-    const [showSplash, setShowSplash] = useState(true);
+    const isLoading = navigation.state !== "idle";
+    const isPro = shop?.plan === "pro";
 
     const handleQuickScan = (projectId) => {
         submit({ action: "quickScan", projectId }, { method: "POST" });
     };
 
-    if (showSplash) {
-        return (
-            <div className="splash-screen">
-                <TubesBackground>
-                    <div className="splash-content">
-                        {/* Logo & Title Integration */}
-                        <div className="splash-logo-container">
-                            <img
-                                src="/achty-logo.png"
-                                alt="ACHTy AI"
-                                className="splash-logo-img"
-                            />
-                            <h1 className="splash-brand-text">
-                                ACHT<span className="brand-y">y</span> <span className="brand-ai">AI</span>
-                            </h1>
-                        </div>
-
-                        {/* Subtitle */}
-                        <p className="splash-subtitle">
-                            What if AI platforms like ChatGPT, Claude & Gemini recommended your business?
-                        </p>
-
-                        {/* Tagline */}
-                        <p className="splash-tagline">
-                            ACHTy AI makes it happen. A new era in AI-powered SEO. Secure your spot today.
-                        </p>
-
-                        {/* CTA Button */}
-                        <div className="splash-btn-container">
-                            <button
-                                onClick={() => setShowSplash(false)}
-                                className="splash-enter-btn"
-                            >
-                                <div className="splash-btn-sweep" />
-                                <span className="btn-text">Enter App</span>
-                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M5 12h14" />
-                                    <path d="m12 5 7 7-7 7" />
-                                </svg>
-                            </button>
-                        </div>
-                    </div>
-                </TubesBackground>
-            </div>
+    const handleAddSubmit = (e) => {
+        e.preventDefault();
+        if (!newDomain.trim()) return;
+        submit(
+            { action: "addProject", url: newDomain.trim(), name: newName.trim() || newDomain.trim() },
+            { method: "POST" }
         );
-    }
+        setNewDomain("");
+        setNewName("");
+        setShowAddForm(false);
+    };
+
+    const handleCopyLlms = async () => {
+        try {
+            await navigator.clipboard.writeText(llmsPreview);
+            setCopiedLlms(true);
+            setTimeout(() => setCopiedLlms(false), 2500);
+        } catch {
+            setCopiedLlms(false);
+        }
+    };
 
     return (
         <div className="app-wrapper">
@@ -533,73 +412,183 @@ export default function Dashboard() {
                     <div>
                         <div className="overview-pill">
                             <div className="overview-dot" />
-                            <span className="overview-text">OVERVIEW</span>
+                            <span className="overview-text">
+                                ACHTy AI · {isPro ? "PRO PLAN" : `STARTER PLAN (${totalScans}/${freeScanLimit} AUDITS)`}
+                            </span>
                         </div>
-                        <h1 className="hero-title">Dashboard</h1>
+                        <h1 className="hero-title">AI Visibility Dashboard</h1>
                     </div>
-                    {projects.length > 0 && (
-                        <button className="aivista-add-btn" onClick={() => {
-                            const url = prompt("Enter alternative domain to monitor (e.g., myshop.com):");
-                            if (url) submit({ action: "addProject", url, name: url }, { method: "POST" });
-                        }}>
-                            <span style={{ fontSize: '1rem', fontWeight: 'bold' }}>+</span> New Project
+                    <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                        {!isPro && (
+                            <Link
+                                to="/app/billing"
+                                className="scan-button-dark"
+                                style={{ textDecoration: "none", borderColor: "#e8822a", color: "#fb923c" }}
+                            >
+                                Upgrade to Pro
+                            </Link>
+                        )}
+                        <button
+                            className="aivista-add-btn"
+                            onClick={() => setShowAddForm((prev) => !prev)}
+                        >
+                            <span style={{ fontSize: "1rem", fontWeight: "bold" }}>+</span>{" "}
+                            {showAddForm ? "Cancel" : "Add Domain"}
                         </button>
-                    )}
+                    </div>
                 </div>
 
-                <div className="metric-grid" style={{ marginBottom: '3rem' }}>
-                    <div className="aivista-stat-card" style={{ background: 'linear-gradient(to bottom right, rgba(249, 115, 22, 0.15), transparent)' }}>
+                {actionData?.error && (
+                    <div
+                        className="premium-card"
+                        style={{
+                            marginBottom: "1.5rem",
+                            borderColor: "#ef4444",
+                            color: "#fecaca",
+                            padding: "1rem 1.25rem",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: "1rem",
+                        }}
+                    >
+                        <span>{actionData.error}</span>
+                        {actionData.upgradeCta && (
+                            <Link
+                                to="/app/billing"
+                                className="primary-button"
+                                style={{ textDecoration: "none", padding: "0.45rem 0.9rem", fontSize: "0.85rem" }}
+                            >
+                                View Pro Plan
+                            </Link>
+                        )}
+                    </div>
+                )}
+
+                {actionData?.message && (
+                    <div
+                        className="premium-card"
+                        style={{
+                            marginBottom: "1.5rem",
+                            borderColor: "#10b981",
+                            color: "#a7f3d0",
+                            padding: "1rem 1.25rem",
+                        }}
+                    >
+                        {actionData.message}
+                    </div>
+                )}
+
+                {showAddForm && (
+                    <form
+                        onSubmit={handleAddSubmit}
+                        className="premium-card"
+                        style={{
+                            marginBottom: "1.75rem",
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "0.75rem",
+                            alignItems: "flex-end",
+                        }}
+                    >
+                        <div style={{ flex: "1 1 220px" }}>
+                            <label style={{ display: "block", fontSize: "0.8rem", color: "#a1a1aa", marginBottom: "0.35rem" }}>
+                                Store or Competitor Domain
+                            </label>
+                            <input
+                                type="text"
+                                required
+                                value={newDomain}
+                                onChange={(e) => setNewDomain(e.target.value)}
+                                placeholder={primaryHost}
+                                style={{
+                                    width: "100%",
+                                    padding: "0.6rem 0.85rem",
+                                    borderRadius: "8px",
+                                    border: "1px solid rgba(255,255,255,0.15)",
+                                    background: "rgba(255,255,255,0.05)",
+                                    color: "#fff",
+                                }}
+                            />
+                        </div>
+                        <div style={{ flex: "1 1 180px" }}>
+                            <label style={{ display: "block", fontSize: "0.8rem", color: "#a1a1aa", marginBottom: "0.35rem" }}>
+                                Label (optional)
+                            </label>
+                            <input
+                                type="text"
+                                value={newName}
+                                onChange={(e) => setNewName(e.target.value)}
+                                placeholder="My Storefront"
+                                style={{
+                                    width: "100%",
+                                    padding: "0.6rem 0.85rem",
+                                    borderRadius: "8px",
+                                    border: "1px solid rgba(255,255,255,0.15)",
+                                    background: "rgba(255,255,255,0.05)",
+                                    color: "#fff",
+                                }}
+                            />
+                        </div>
+                        <button type="submit" className="primary-button" disabled={isLoading}>
+                            {isLoading ? "Adding..." : "Track Domain"}
+                        </button>
+                    </form>
+                )}
+
+                <div className="metric-grid" style={{ marginBottom: "2.5rem" }}>
+                    <div className="aivista-stat-card" style={{ background: "linear-gradient(to bottom right, rgba(249, 115, 22, 0.15), transparent)" }}>
                         <div className="absolute-decor" />
                         <div className="stat-header">
-                            <div className="stat-icon-wrapper" style={{ background: 'rgba(249, 115, 22, 0.15)' }}>
-                                <span style={{ fontSize: '1.2rem' }}>👁️</span>
+                            <div className="stat-icon-wrapper" style={{ background: "rgba(249, 115, 22, 0.15)" }}>
+                                <span style={{ fontSize: "1.2rem" }}>👁️</span>
                             </div>
                         </div>
                         <div>
                             <div className="stat-label">Visibility Score</div>
                             <div className="stat-value">
-                                {avgScore !== null ? avgScore : "0"}
-                                <span className="stat-suffix">/100</span>
+                                {avgScore !== null ? avgScore : "—"}
+                                {avgScore !== null && <span className="stat-suffix">/100</span>}
                             </div>
                         </div>
                     </div>
 
-                    <div className="aivista-stat-card" style={{ background: 'linear-gradient(to bottom right, rgba(59, 130, 246, 0.1), transparent)' }}>
+                    <div className="aivista-stat-card" style={{ background: "linear-gradient(to bottom right, rgba(59, 130, 246, 0.1), transparent)" }}>
                         <div className="absolute-decor" />
                         <div className="stat-header">
-                            <div className="stat-icon-wrapper" style={{ background: 'rgba(59, 130, 246, 0.15)' }}>
-                                <span style={{ fontSize: '1.2rem' }}>💬</span>
+                            <div className="stat-icon-wrapper" style={{ background: "rgba(59, 130, 246, 0.15)" }}>
+                                <span style={{ fontSize: "1.2rem" }}>✅</span>
                             </div>
                         </div>
                         <div>
-                            <div className="stat-label">Total Mentions</div>
-                            <div className="stat-value">{totalMentions}</div>
+                            <div className="stat-label">Passed GEO Checks</div>
+                            <div className="stat-value">{passedChecks}</div>
                         </div>
                     </div>
 
-                    <div className="aivista-stat-card" style={{ background: 'linear-gradient(to bottom right, rgba(16, 185, 129, 0.1), transparent)' }}>
+                    <div className="aivista-stat-card" style={{ background: "linear-gradient(to bottom right, rgba(16, 185, 129, 0.1), transparent)" }}>
                         <div className="absolute-decor" />
                         <div className="stat-header">
-                            <div className="stat-icon-wrapper" style={{ background: 'rgba(16, 185, 129, 0.15)' }}>
-                                <span style={{ fontSize: '1.2rem' }}>✅</span>
+                            <div className="stat-icon-wrapper" style={{ background: "rgba(16, 185, 129, 0.15)" }}>
+                                <span style={{ fontSize: "1.2rem" }}>⚡</span>
                             </div>
                         </div>
                         <div>
-                            <div className="stat-label">Total Scans</div>
+                            <div className="stat-label">Total Audits</div>
                             <div className="stat-value">{totalScans}</div>
                         </div>
                     </div>
 
-                    <div className="aivista-stat-card" style={{ background: 'linear-gradient(to bottom right, rgba(239, 68, 68, 0.1), transparent)' }}>
+                    <div className="aivista-stat-card" style={{ background: "linear-gradient(to bottom right, rgba(239, 68, 68, 0.1), transparent)" }}>
                         <div className="absolute-decor" />
                         <div className="stat-header">
-                            <div className="stat-icon-wrapper" style={{ background: 'rgba(239, 68, 68, 0.15)' }}>
-                                <span style={{ fontSize: '1.2rem' }}>⚠</span>
+                            <div className="stat-icon-wrapper" style={{ background: "rgba(239, 68, 68, 0.15)" }}>
+                                <span style={{ fontSize: "1.2rem" }}>⚠</span>
                             </div>
                         </div>
                         <div>
                             <div className="stat-label">Risk Alerts</div>
-                            <div className="stat-value">0</div>
+                            <div className="stat-value">{riskAlerts}</div>
                         </div>
                     </div>
                 </div>
@@ -611,35 +600,47 @@ export default function Dashboard() {
                 {projects.length === 0 ? (
                     <div className="premium-card empty-state-card">
                         <div style={{ color: "#a1a1aa", fontSize: "1.05rem", marginBottom: "1.5rem" }}>
-                            Start tracking your store's AI Discoverability score immediately.
+                            Audit your store&rsquo;s live AI crawl access, <code>/llms.txt</code>, JSON-LD schema, and product catalog readiness for ChatGPT, Claude &amp; Gemini.
                         </div>
-                        <button className="primary-button" onClick={() => {
-                            let url = shop.shopDomain;
-                            submit({ action: "addProject", url, name: "My Store" }, { method: "POST" });
-                        }}>
-                            Track My Store ({shop.shopDomain})
+                        <button
+                            className="primary-button"
+                            disabled={isLoading}
+                            onClick={() => {
+                                submit(
+                                    { action: "addProject", url: primaryHost, name: shop.shopName || "My Store" },
+                                    { method: "POST" }
+                                );
+                            }}
+                        >
+                            Track My Store ({primaryHost})
                         </button>
                     </div>
                 ) : (
                     <div className="projects-grid">
                         {projects.map((project) => {
                             const lastScan = project.scans[0];
+                            const isConfirming = confirmDeleteId === project.id;
                             return (
                                 <div key={project.id} className="project-card">
                                     <div className="project-header">
                                         <div>
                                             <h3>{project.name}</h3>
-                                            <a href={`https://${project.url}`} target="_blank" rel="noreferrer" className="project-url">
+                                            <a
+                                                href={`https://${project.url}`}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="project-url"
+                                            >
                                                 {project.url}
                                             </a>
                                         </div>
                                         <div className="project-actions">
                                             {lastScan ? (
-                                                <span className={`dark-badge ${lastScan.status === 'completed' ? 'success' : 'warning'}`}>
-                                                    Score: {lastScan.score || 0}/100
+                                                <span className={`dark-badge ${lastScan.score >= 70 ? "success" : "warning"}`}>
+                                                    Score: {Math.round(lastScan.score || 0)}/100
                                                 </span>
                                             ) : (
-                                                <span className="dark-badge">NEVER SCANNED</span>
+                                                <span className="dark-badge">NOT AUDITED</span>
                                             )}
 
                                             <button
@@ -647,29 +648,93 @@ export default function Dashboard() {
                                                 onClick={() => handleQuickScan(project.id)}
                                                 disabled={isLoading}
                                             >
-                                                {isLoading ? "⚡ Analyzing..." : "⚡ Run Manual Scan"}
+                                                {isLoading ? "⚡ Auditing..." : "⚡ Re-Run Audit"}
                                             </button>
 
-                                            <button
-                                                className="scan-button-dark"
-                                                style={{ background: 'transparent', borderColor: '#ef4444', color: '#ef4444' }}
-                                                onClick={() => {
-                                                    if (confirm("Are you sure? This cannot be undone.")) {
-                                                        submit({ action: "deleteProject", projectId: project.id }, { method: "POST" });
-                                                    }
-                                                }}
-                                            >
-                                                ✖
-                                            </button>
+                                            {isConfirming ? (
+                                                <>
+                                                    <button
+                                                        className="scan-button-dark"
+                                                        style={{ background: "#ef4444", borderColor: "#ef4444", color: "#fff" }}
+                                                        onClick={() => {
+                                                            setConfirmDeleteId(null);
+                                                            submit(
+                                                                { action: "deleteProject", projectId: project.id },
+                                                                { method: "POST" }
+                                                            );
+                                                        }}
+                                                    >
+                                                        Confirm Delete
+                                                    </button>
+                                                    <button
+                                                        className="scan-button-dark"
+                                                        onClick={() => setConfirmDeleteId(null)}
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <button
+                                                    className="scan-button-dark"
+                                                    style={{ background: "transparent", borderColor: "#ef4444", color: "#ef4444" }}
+                                                    aria-label={`Remove ${project.name}`}
+                                                    onClick={() => setConfirmDeleteId(project.id)}
+                                                >
+                                                    ✖
+                                                </button>
+                                            )}
                                         </div>
                                     </div>
 
-                                    <AiSeoPanel project={project} lastScan={lastScan} onScan={handleQuickScan} />
+                                    <AuditResultsPanel
+                                        project={project}
+                                        lastScan={lastScan}
+                                        isScanning={isLoading}
+                                        onScan={handleQuickScan}
+                                    />
                                 </div>
                             );
                         })}
                     </div>
                 )}
+
+                {/* Auto-generated llms.txt Blueprint */}
+                <div className="section-header" style={{ marginTop: "2.5rem" }}>
+                    <h2>Storefront llms.txt Generator</h2>
+                </div>
+                <div className="premium-card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
+                        <p style={{ color: "#a1a1aa", margin: 0, fontSize: "0.9rem" }}>
+                            Auto-built from your live Shopify catalog &amp; pages so AI engines accurately cite your products.
+                        </p>
+                        {isPro ? (
+                            <button className="scan-button-dark" onClick={handleCopyLlms}>
+                                {copiedLlms ? "✓ Copied llms.txt" : "Copy llms.txt"}
+                            </button>
+                        ) : (
+                            <Link to="/app/billing" className="scan-button-dark" style={{ textDecoration: "none", borderColor: "#e8822a", color: "#fb923c" }}>
+                                Unlock Full Copy on Pro
+                            </Link>
+                        )}
+                    </div>
+                    <pre
+                        style={{
+                            background: "rgba(0,0,0,0.45)",
+                            border: "1px solid rgba(255,255,255,0.08)",
+                            borderRadius: "10px",
+                            padding: "1rem",
+                            color: "#d4d4d8",
+                            fontSize: "0.82rem",
+                            overflowX: "auto",
+                            whiteSpace: "pre-wrap",
+                            margin: 0,
+                        }}
+                    >
+                        {isPro
+                            ? llmsPreview
+                            : `${llmsPreview.split("\n").slice(0, 8).join("\n")}\n\n... [Upgrade to Pro to export full catalog llms.txt & track competitors]`}
+                    </pre>
+                </div>
             </div>
         </div>
     );

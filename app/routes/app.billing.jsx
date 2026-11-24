@@ -1,5 +1,5 @@
 import { json } from "@remix-run/node";
-import { useLoaderData, useSubmit } from "@remix-run/react";
+import { useActionData, useLoaderData, useNavigation, useSubmit } from "@remix-run/react";
 import dashboardStyles from "../styles/dashboard.css?url";
 import { authenticate, MONTHLY_PLAN, IS_TEST_BILLING } from "../shopify.server";
 import prisma from "../db.server";
@@ -9,22 +9,26 @@ export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 export const loader = async ({ request }) => {
     const { session, billing } = await authenticate.admin(request);
 
-    // Check if the merchant has an active subscription
     const billingConfig = await billing.check({
         plans: [MONTHLY_PLAN],
         isTest: IS_TEST_BILLING,
     });
-    const hasActiveSubscription = billingConfig.appSubscriptions.some(sub => sub.name === MONTHLY_PLAN);
+    const hasActiveSubscription = billingConfig.appSubscriptions.some(
+        (sub) => sub.name === MONTHLY_PLAN
+    );
 
-    // Sync the subscription status to our local database
-    await prisma.shop.update({
-        where: { shopDomain: session.shop },
-        data: { plan: hasActiveSubscription ? "pro" : "free" } // keep DB in sync
-    });
+    const plan = hasActiveSubscription ? "pro" : "free";
 
-    const shop = await prisma.shop.findUnique({
+    // Upsert ensures new installs visiting Billing directly never fail with Prisma P2025
+    const shop = await prisma.shop.upsert({
         where: { shopDomain: session.shop },
-        include: { projects: true }
+        update: { plan },
+        create: {
+            shopDomain: session.shop,
+            shopName: session.shop.replace(".myshopify.com", ""),
+            plan,
+        },
+        include: { projects: true },
     });
 
     return json({ shop, hasActiveSubscription });
@@ -33,25 +37,27 @@ export const loader = async ({ request }) => {
 export const action = async ({ request }) => {
     const { session, billing } = await authenticate.admin(request);
     const formData = await request.formData();
-    const action = formData.get("action");
+    const intent = formData.get("action");
 
-    if (action === "upgrade") {
-        // This will redirect the user to Shopify's billing approval page automatically
+    if (intent === "upgrade") {
+        const storeHandle = session.shop.replace(/\.myshopify\.com$/i, "");
         await billing.request({
             plan: MONTHLY_PLAN,
             isTest: IS_TEST_BILLING,
-            returnUrl: `https://${session.shop}/admin/apps/${process.env.SHOPIFY_API_KEY}/app/billing`,
+            returnUrl: `https://admin.shopify.com/store/${storeHandle}/apps/${process.env.SHOPIFY_API_KEY}/app/billing`,
         });
         return null;
     }
 
-    if (action === "downgrade") {
+    if (intent === "downgrade") {
         const billingCheck = await billing.check({
             plans: [MONTHLY_PLAN],
             isTest: IS_TEST_BILLING,
         });
 
-        const activeSubscription = billingCheck.appSubscriptions.find(sub => sub.name === MONTHLY_PLAN);
+        const activeSubscription = billingCheck.appSubscriptions.find(
+            (sub) => sub.name === MONTHLY_PLAN
+        );
 
         if (activeSubscription) {
             await billing.cancel({
@@ -60,14 +66,19 @@ export const action = async ({ request }) => {
                 prorate: true,
             });
 
-            await prisma.shop.update({
+            await prisma.shop.upsert({
                 where: { shopDomain: session.shop },
-                data: { plan: "free" }
+                update: { plan: "free" },
+                create: {
+                    shopDomain: session.shop,
+                    shopName: session.shop.replace(".myshopify.com", ""),
+                    plan: "free",
+                },
             });
 
-            return json({ success: true, message: "Subscription cancelled successfully." });
+            return json({ success: true, message: "Pro subscription cancelled. Your store is now on the Starter plan." });
         }
-        return json({ error: "No active subscription found to cancel." }, { status: 400 });
+        return json({ error: "No active Pro subscription found to cancel." }, { status: 400 });
     }
 
     return null;
@@ -75,7 +86,10 @@ export const action = async ({ request }) => {
 
 export default function Billing() {
     const { shop } = useLoaderData();
+    const actionData = useActionData();
     const submit = useSubmit();
+    const navigation = useNavigation();
+    const isSubmitting = navigation.state !== "idle";
 
     const isPro = shop?.plan === "pro";
 
@@ -83,59 +97,101 @@ export default function Billing() {
         <div className="app-wrapper">
             <div className="dashboard-container">
                 <div className="section-header">
-                    <h2>Subscription & Billing</h2>
+                    <h2>Subscription &amp; Billing</h2>
                 </div>
 
-                <div className="metric-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-                    {/* Free Plan Box */}
-                    <div className="premium-card" style={{ borderColor: isPro ? 'var(--border-color)' : '#10b981' }}>
-                        <div className="metric-title" style={{ color: isPro ? 'var(--text-muted)' : '#34d399' }}>
+                {actionData?.message && (
+                    <div
+                        className="premium-card"
+                        style={{
+                            marginBottom: "1.5rem",
+                            borderColor: "#10b981",
+                            color: "#a7f3d0",
+                            padding: "1rem 1.25rem",
+                        }}
+                    >
+                        {actionData.message}
+                    </div>
+                )}
+
+                {actionData?.error && (
+                    <div
+                        className="premium-card"
+                        style={{
+                            marginBottom: "1.5rem",
+                            borderColor: "#ef4444",
+                            color: "#fecaca",
+                            padding: "1rem 1.25rem",
+                        }}
+                    >
+                        {actionData.error}
+                    </div>
+                )}
+
+                <div className="metric-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+                    {/* Starter Plan */}
+                    <div className="premium-card" style={{ borderColor: isPro ? "var(--border-color)" : "#10b981" }}>
+                        <div className="metric-title" style={{ color: isPro ? "var(--text-muted)" : "#34d399" }}>
                             <span>Starter Plan</span>
-                            {(!isPro) && <span className="dark-badge success">ACTIVE</span>}
+                            {!isPro && <span className="dark-badge success">ACTIVE</span>}
                         </div>
-                        <div className="metric-value">$0 <span style={{ fontSize: '1rem', color: '#a1a1aa' }}>/mo</span></div>
-                        <div style={{ marginTop: '1rem', color: '#a1a1aa' }}>
-                            <ul style={{ listStyle: 'none', padding: 0, lineHeight: 2 }}>
-                                <li>✅ Track 1 Domain</li>
-                                <li>✅ 1 Free AI Scan</li>
-                                <li>❌ Limited Score Range</li>
-                                <li>❌ No Competitor Analysis</li>
+                        <div className="metric-value">
+                            $0 <span style={{ fontSize: "1rem", color: "#a1a1aa" }}>/mo</span>
+                        </div>
+                        <div style={{ marginTop: "1rem", color: "#a1a1aa" }}>
+                            <ul style={{ listStyle: "none", padding: 0, lineHeight: 2 }}>
+                                <li>✅ Track 1 Storefront Domain</li>
+                                <li>✅ Up to 3 Full AI Readiness Audits</li>
+                                <li>✅ Live AI Crawler, JSON-LD &amp; Metadata Audit</li>
+                                <li>✅ Complete Honest 0–100 Visibility Score</li>
+                                <li>❌ Multi-Domain Competitor Tracking</li>
+                                <li>❌ Full Storefront llms.txt Auto-Generator</li>
                             </ul>
                         </div>
                         {isPro && (
                             <button
                                 className="primary-button"
-                                style={{ marginTop: '1.5rem', width: '100%', background: 'transparent', border: '1px solid #ef4444', color: '#ef4444' }}
-                                onClick={() => submit({ action: 'downgrade' }, { method: "POST" })}
+                                disabled={isSubmitting}
+                                style={{
+                                    marginTop: "1.5rem",
+                                    width: "100%",
+                                    background: "transparent",
+                                    border: "1px solid #ef4444",
+                                    color: "#ef4444",
+                                }}
+                                onClick={() => submit({ action: "downgrade" }, { method: "POST" })}
                             >
-                                Downgrade to Free
+                                {isSubmitting ? "Processing..." : "Downgrade to Starter"}
                             </button>
                         )}
                     </div>
 
-                    {/* Pro Plan Box */}
-                    <div className="premium-card" style={{ borderColor: isPro ? '#10b981' : 'var(--border-color)' }}>
-                        <div className="metric-title" style={{ color: isPro ? '#34d399' : 'var(--text-muted)' }}>
+                    {/* Pro Plan */}
+                    <div className="premium-card" style={{ borderColor: isPro ? "#10b981" : "var(--border-color)" }}>
+                        <div className="metric-title" style={{ color: isPro ? "#34d399" : "var(--text-muted)" }}>
                             <span>Pro Plan</span>
                             {isPro && <span className="dark-badge success">ACTIVE</span>}
                         </div>
-                        <div className="metric-value">$199.90 <span style={{ fontSize: '1rem', color: '#a1a1aa' }}>/mo</span></div>
-                        <div style={{ marginTop: '1rem', color: '#a1a1aa' }}>
-                            <ul style={{ listStyle: 'none', padding: 0, lineHeight: 2 }}>
-                                <li>✨ Track Unlimited Domains</li>
-                                <li>✨ Unlimited AI Scans</li>
-                                <li>✨ Full Score Range (up to 100)</li>
-                                <li>✨ Premium AI SEO Optimizer</li>
-                                <li>✨ Deep Competitor Analysis</li>
+                        <div className="metric-value">
+                            $199.90 <span style={{ fontSize: "1rem", color: "#a1a1aa" }}>/mo</span>
+                        </div>
+                        <div style={{ marginTop: "1rem", color: "#a1a1aa" }}>
+                            <ul style={{ listStyle: "none", padding: 0, lineHeight: 2 }}>
+                                <li>✨ Track Unlimited Store &amp; Competitor Domains</li>
+                                <li>✨ Unlimited Real-Time AI &amp; GEO Audits</li>
+                                <li>✨ Full Product Catalog &amp; Content Readiness Audit</li>
+                                <li>✨ 1-Click Auto-Generated Storefront llms.txt</li>
+                                <li>✨ Prioritized AI Recommendation Insights</li>
                             </ul>
                         </div>
                         {!isPro && (
                             <button
                                 className="ai-seo-idle-btn"
-                                style={{ marginTop: '1.5rem' }}
-                                onClick={() => submit({ action: 'upgrade' }, { method: "POST" })}
+                                disabled={isSubmitting}
+                                style={{ marginTop: "1.5rem" }}
+                                onClick={() => submit({ action: "upgrade" }, { method: "POST" })}
                             >
-                                Upgrade to Pro
+                                {isSubmitting ? "Redirecting to Shopify Billing..." : "Upgrade to Pro"}
                             </button>
                         )}
                     </div>
